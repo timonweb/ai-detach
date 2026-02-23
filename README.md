@@ -91,3 +91,5 @@ cp ai-detach /usr/local/bin/ai-detach
 ## License
 
 MIT
+
+2026 (c) Tim Kamanin — [A Full-Stack Django/Wagtail/AI Developer](https://timonweb.com)
