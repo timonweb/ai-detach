@@ -1,0 +1,380 @@
+#!/usr/bin/env bash
+# ai-detach — Extract AI tool config files from git repos into symlinked sibling directories
+# https://github.com/timonweb/ai-detach
+set -euo pipefail
+
+VERSION="0.1.0"
+
+# --- Colors (disabled when not a tty) ---
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    RESET='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' DIM='' RESET=''
+fi
+
+# --- AI file patterns ---
+# Files (checked with -e for existence)
+AI_FILES="CLAUDE.md .mcp.json .cursorules .cursorrules .windsurfrules WARP.md AGENTS.md codex.md"
+# Directories (checked with -d)
+AI_DIRS=".claude .cursor .windsurf .copilot .playwright-mcp .agents .codex"
+# Glob patterns (expanded at runtime)
+AI_GLOBS=".aider*"
+# Special paths (checked relative to project root)
+AI_SPECIAL=".github/copilot-instructions.md"
+
+# --- Utilities ---
+info()    { printf "${BLUE}[info]${RESET} %s\n" "$*"; }
+success() { printf "${GREEN}[ok]${RESET}   %s\n" "$*"; }
+warn()    { printf "${YELLOW}[warn]${RESET} %s\n" "$*"; }
+die()     { printf "${RED}[error]${RESET} %s\n" "$*" >&2; exit 1; }
+
+usage() {
+    cat <<EOF
+${BOLD}ai-detach${RESET} v${VERSION} — Extract AI config files from git repos
+
+${BOLD}USAGE${RESET}
+    ai-detach [options] [project-path]
+
+${BOLD}OPTIONS${RESET}
+    -n, --dry-run    Preview operations without making changes
+    -l, --list       List detected AI files only
+    -h, --help       Show this help
+    -v, --version    Show version
+
+${BOLD}EXAMPLES${RESET}
+    ai-detach ~/code/project          Move files, create ~/code/project-ai/
+    ai-detach --dry-run .         Preview what would happen
+    ai-detach --list              List AI files in current dir
+
+${BOLD}DETECTED PATTERNS${RESET}
+    CLAUDE.md, .claude/           Claude Code
+    .mcp.json                     MCP config
+    .cursorules, .cursorrules,    Cursor
+      .cursor/
+    WARP.md                       Warp
+    .windsurf/, .windsurfrules    Windsurf
+    .aider*                       Aider
+    .copilot/,                    GitHub Copilot
+      .github/copilot-instructions.md
+    .playwright-mcp/              Playwright MCP
+    AGENTS.md, .agents/           Agents spec
+    codex.md, .codex/             OpenAI Codex
+EOF
+}
+
+resolve_path() {
+    # Resolve to absolute path, handling ~ and relative paths
+    local p="$1"
+    # Expand ~ manually (doesn't expand in variables)
+    case "$p" in
+        "~"*)  p="${HOME}${p#"~"}" ;;
+    esac
+    # Use cd/pwd for reliable resolution
+    if [ -d "$p" ]; then
+        (cd "$p" && pwd)
+    else
+        die "Directory does not exist: $p"
+    fi
+}
+
+# --- Detection ---
+detect_ai_files() {
+    local project="$1"
+    DETECTED=()
+
+    # Plain files
+    for f in $AI_FILES; do
+        if [ -e "${project}/${f}" ]; then
+            DETECTED[${#DETECTED[@]}]="$f"
+        fi
+    done
+
+    # Directories
+    for d in $AI_DIRS; do
+        if [ -d "${project}/${d}" ]; then
+            DETECTED[${#DETECTED[@]}]="$d"
+        fi
+    done
+
+    # Glob patterns (use nullglob-safe approach for bash 3.2)
+    for pattern in $AI_GLOBS; do
+        local found
+        found=$(cd "$project" && ls -d $pattern 2>/dev/null) || true
+        if [ -n "$found" ]; then
+            local item
+            while IFS= read -r item; do
+                [ -n "$item" ] && DETECTED[${#DETECTED[@]}]="$item"
+            done <<< "$found"
+        fi
+    done
+
+    # Special paths
+    for sp in $AI_SPECIAL; do
+        if [ -e "${project}/${sp}" ]; then
+            DETECTED[${#DETECTED[@]}]="$sp"
+        fi
+    done
+}
+
+# --- Git helpers ---
+is_git_repo() {
+    (cd "$1" && git rev-parse --git-dir >/dev/null 2>&1)
+}
+
+is_gitignored() {
+    local project="$1" filepath="$2"
+    (cd "$project" && git check-ignore -q "$filepath" 2>/dev/null)
+}
+
+is_git_tracked() {
+    local project="$1" filepath="$2"
+    (cd "$project" && git ls-files --error-unmatch "$filepath" >/dev/null 2>&1)
+}
+
+# --- Gitignore management ---
+ensure_gitignored() {
+    local project="$1"
+    shift
+    local entries=("$@")
+    local gitignore="${project}/.gitignore"
+    local header="# AI tool configs (managed by ai-detach)"
+    local added=0
+
+    # Read existing gitignore content (or empty)
+    local content=""
+    if [ -f "$gitignore" ]; then
+        content=$(cat "$gitignore")
+    fi
+
+    # Collect entries that need adding
+    local to_add=""
+    for entry in "${entries[@]}"; do
+        # Normalize: directories get trailing /
+        local pattern="$entry"
+        if [ -d "${project}/${entry}" ] || [ -L "${project}/${entry}" ] && [ -d "$(readlink "${project}/${entry}" 2>/dev/null || true)" ]; then
+            case "$pattern" in
+                */) ;; # already has slash
+                *)  pattern="${pattern}/" ;;
+            esac
+        fi
+
+        # Check if already in gitignore (exact line match)
+        if ! echo "$content" | grep -qxF "$pattern" 2>/dev/null; then
+            to_add="${to_add}${pattern}"$'\n'
+            added=$((added + 1))
+        fi
+    done
+
+    if [ "$added" -eq 0 ]; then
+        return 0
+    fi
+
+    # Append to gitignore
+    {
+        # Add a blank line separator if file exists and doesn't end with newline
+        if [ -f "$gitignore" ] && [ -s "$gitignore" ]; then
+            # Check if header already exists
+            if ! grep -qF "$header" "$gitignore" 2>/dev/null; then
+                echo ""
+                echo "$header"
+            fi
+        else
+            echo "$header"
+        fi
+        printf "%s" "$to_add"
+    } >> "$gitignore"
+
+    echo "$added"
+}
+
+# --- Core operations ---
+move_and_link() {
+    local project="$1" ai_dir="$2" filepath="$3" dry_run="$4"
+    local src="${project}/${filepath}"
+    local dst="${ai_dir}/${filepath}"
+    local project_name
+    project_name=$(basename "$project")
+    local ai_dir_name
+    ai_dir_name=$(basename "$ai_dir")
+
+    # Already a symlink pointing to the right place? Skip.
+    if [ -L "$src" ]; then
+        local target
+        target=$(readlink "$src" 2>/dev/null) || true
+        success "Already symlinked: ${filepath} -> ${target}"
+        return 0
+    fi
+
+    # Source doesn't exist
+    if [ ! -e "$src" ]; then
+        warn "Not found (skipping): ${filepath}"
+        return 0
+    fi
+
+    # Compute relative symlink path
+    # For top-level files: ../bns-ai/CLAUDE.md
+    # For nested files: ../../bns-ai/.github/copilot-instructions.md
+    local depth
+    depth=$(echo "$filepath" | tr -cd '/' | wc -c | tr -d ' ')
+    local rel_prefix=".."
+    local i=0
+    while [ "$i" -lt "$depth" ]; do
+        rel_prefix="${rel_prefix}/.."
+        i=$((i + 1))
+    done
+    local symlink_target="${rel_prefix}/${ai_dir_name}/${filepath}"
+
+    if [ "$dry_run" = "1" ]; then
+        printf "${BLUE}[info]${RESET} ${DIM}[dry-run]${RESET} mv %s -> %s/%s\n" "$filepath" "$ai_dir_name" "$filepath"
+        printf "${BLUE}[info]${RESET} ${DIM}[dry-run]${RESET} ln -sfn %s -> %s\n" "$symlink_target" "$filepath"
+        return 0
+    fi
+
+    # Create parent directories in ai-dir if needed
+    local dst_parent
+    dst_parent=$(dirname "$dst")
+    mkdir -p "$dst_parent"
+
+    # If git-tracked, remove from index first
+    if is_git_tracked "$project" "$filepath"; then
+        if [ -d "$src" ] && [ ! -L "$src" ]; then
+            (cd "$project" && git rm --cached -r "$filepath" >/dev/null 2>&1) || true
+        else
+            (cd "$project" && git rm --cached "$filepath" >/dev/null 2>&1) || true
+        fi
+        info "Removed from git index: ${filepath}"
+    fi
+
+    # Move to ai-dir
+    mv "$src" "$dst"
+
+    # Create parent directory for symlink if needed (for nested paths like .github/...)
+    local src_parent
+    src_parent=$(dirname "$src")
+    mkdir -p "$src_parent"
+
+    # Create relative symlink back
+    ln -sfn "$symlink_target" "$src"
+
+    success "Moved: ${filepath} -> ${ai_dir_name}/${filepath}"
+}
+
+# --- Main ---
+main() {
+    local dry_run=0
+    local list_only=0
+    local project_path=""
+
+    # Parse args
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -n|--dry-run) dry_run=1 ;;
+            -l|--list)    list_only=1 ;;
+            -h|--help)    usage; exit 0 ;;
+            -v|--version) echo "ai-detach v${VERSION}"; exit 0 ;;
+            -*)           die "Unknown option: $1 (try --help)" ;;
+            *)
+                [ -z "$project_path" ] || die "Too many arguments (try --help)"
+                project_path="$1"
+                ;;
+        esac
+        shift
+    done
+
+    # Default to current directory
+    [ -z "$project_path" ] && project_path="."
+    project_path=$(resolve_path "$project_path")
+    local project_name
+    project_name=$(basename "$project_path")
+
+    printf "${BOLD}ai-detach${RESET} v${VERSION}\n"
+    printf "Project: ${BOLD}%s${RESET}\n\n" "$project_path"
+
+    # Must be a git repo
+    is_git_repo "$project_path" || die "Not a git repository: $project_path"
+
+    # Detect AI files
+    detect_ai_files "$project_path"
+
+    if [ ${#DETECTED[@]} -eq 0 ]; then
+        info "No AI config files detected in ${project_name}/"
+        exit 0
+    fi
+
+    # List mode
+    if [ "$list_only" = "1" ]; then
+        printf "${BOLD}Detected AI files (%d):${RESET}\n" "${#DETECTED[@]}"
+        for f in "${DETECTED[@]}"; do
+            if [ -L "${project_path}/${f}" ]; then
+                local target
+                target=$(readlink "${project_path}/${f}" 2>/dev/null) || true
+                printf "  ${DIM}%s -> %s (symlinked)${RESET}\n" "$f" "$target"
+            elif [ -d "${project_path}/${f}" ]; then
+                printf "  %s/\n" "$f"
+            else
+                printf "  %s\n" "$f"
+            fi
+        done
+        exit 0
+    fi
+
+    local ai_dir
+    ai_dir=$(dirname "$project_path")/${project_name}-ai
+
+    if [ "$dry_run" = "1" ]; then
+        printf "${YELLOW}[dry-run]${RESET} Would create: ${BOLD}%s${RESET}\n" "$ai_dir"
+    else
+        mkdir -p "$ai_dir"
+        success "AI directory: ${ai_dir}"
+    fi
+    echo ""
+
+    # Process each detected file
+    local moved=0
+    local skipped=0
+    for filepath in "${DETECTED[@]}"; do
+        if [ -L "${project_path}/${filepath}" ]; then
+            skipped=$((skipped + 1))
+        else
+            moved=$((moved + 1))
+        fi
+        move_and_link "$project_path" "$ai_dir" "$filepath" "$dry_run"
+    done
+
+    echo ""
+
+    # Update .gitignore
+    if [ "$dry_run" = "1" ]; then
+        printf "${BLUE}[info]${RESET} ${DIM}[dry-run]${RESET} Would update .gitignore with %d entries\n" "${#DETECTED[@]}"
+    else
+        local added
+        added=$(ensure_gitignored "$project_path" "${DETECTED[@]}") || true
+        if [ -n "$added" ] && [ "$added" != "0" ]; then
+            success "Added ${added} entries to .gitignore"
+        else
+            info ".gitignore already up to date"
+        fi
+    fi
+
+    # Summary
+    echo ""
+    printf "${BOLD}Summary:${RESET} %d file(s) processed" "${#DETECTED[@]}"
+    if [ "$moved" -gt 0 ] && [ "$dry_run" = "0" ]; then
+        printf ", ${GREEN}%d moved${RESET}" "$moved"
+    fi
+    if [ "$skipped" -gt 0 ]; then
+        printf ", %d already symlinked" "$skipped"
+    fi
+    if [ "$dry_run" = "1" ]; then
+        printf " ${YELLOW}(dry-run)${RESET}"
+    fi
+    echo ""
+}
+
+main "$@"
