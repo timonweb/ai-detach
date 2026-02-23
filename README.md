@@ -84,8 +84,13 @@ Given `~/code/project/` with Claude Code files:
 ## Install
 
 ```bash
-# Copy to somewhere on your PATH
-cp ai-detach /usr/local/bin/ai-detach
+curl -fsSL https://raw.githubusercontent.com/timonweb/ai-detach/main/install.sh | bash
+```
+
+Custom install directory:
+
+```bash
+AI_DETACH_INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/timonweb/ai-detach/main/install.sh | bash
 ```
 
 ## License
