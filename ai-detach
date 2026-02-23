@@ -35,37 +35,36 @@ warn()    { printf "${YELLOW}[warn]${RESET} %s\n" "$*"; }
 die()     { printf "${RED}[error]${RESET} %s\n" "$*" >&2; exit 1; }
 
 usage() {
-    cat <<EOF
-${BOLD}ai-detach${RESET} v${VERSION} — Extract AI config files from git repos
+    printf "%bai-detach%b v${VERSION} — Extract AI config files from git repos
 
-${BOLD}USAGE${RESET}
+%bUSAGE%b
     ai-detach [options] [project-path]
 
-${BOLD}OPTIONS${RESET}
+%bOPTIONS%b
     -n, --dry-run    Preview operations without making changes
     -l, --list       List detected AI files only
     -h, --help       Show this help
     -v, --version    Show version
 
-${BOLD}EXAMPLES${RESET}
+%bEXAMPLES%b
     ai-detach ~/code/project          Move files, create ~/code/project-ai/
-    ai-detach --dry-run .         Preview what would happen
-    ai-detach --list              List AI files in current dir
+    ai-detach --dry-run .             Preview what would happen
+    ai-detach --list                  List AI files in current dir
 
-${BOLD}DETECTED PATTERNS${RESET}
-    CLAUDE.md, .claude/           Claude Code
-    .mcp.json                     MCP config
-    .cursorules, .cursorrules,    Cursor
+%bDETECTED PATTERNS%b
+    CLAUDE.md, .claude/               Claude Code
+    .mcp.json                         MCP config
+    .cursorules, .cursorrules,        Cursor
       .cursor/
-    WARP.md                       Warp
-    .windsurf/, .windsurfrules    Windsurf
-    .aider*                       Aider
-    .copilot/,                    GitHub Copilot
+    WARP.md                           Warp
+    .windsurf/, .windsurfrules        Windsurf
+    .aider*                           Aider
+    .copilot/,                        GitHub Copilot
       .github/copilot-instructions.md
-    .playwright-mcp/              Playwright MCP
-    AGENTS.md, .agents/           Agents spec
-    codex.md, .codex/             OpenAI Codex
-EOF
+    .playwright-mcp/                  Playwright MCP
+    AGENTS.md, .agents/               Agents spec
+    codex.md, .codex/                 OpenAI Codex
+" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET" "$BOLD" "$RESET"
 }
 
 resolve_path() {
